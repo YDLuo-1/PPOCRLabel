@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QPlainTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -16,9 +17,19 @@ from libs.autoLabelSettings import LANGUAGES, MODEL_PRESETS
 
 
 class AutoLabelSettingsDialog(QDialog):
-    def __init__(self, config, parent=None, language="ch", cli_overrides=False):
+    def __init__(
+        self,
+        config,
+        parent=None,
+        language="ch",
+        cli_overrides=False,
+        service=None,
+        api_key="",
+    ):
         super().__init__(parent)
         self.language = language
+        self.previous_config = config.copy()
+        service = service or {}
         self.setWindowTitle(self.text("Automatic labeling settings", "自动标注设置"))
         self.setMinimumWidth(620)
         self.source = QComboBox()
@@ -27,7 +38,11 @@ class AutoLabelSettingsDialog(QDialog):
             self.text("Official Paddle model", "官方 Paddle 模型"), "official"
         )
         self.source.addItem(self.text("Local Paddle model", "本地 Paddle 模型"), "local")
-        self.source.setCurrentIndex(self.source.findData(config["model_source"]))
+        self.source.addItem(self.text("LLM vision model", "LLM 视觉模型"), "llm")
+        selected_source = (
+            "llm" if config["backend"] == "llm" else config["model_source"]
+        )
+        self.source.setCurrentIndex(self.source.findData(selected_source))
         self.preset = QComboBox()
         self.preset.setObjectName("modelPreset")
         self.preset.addItems(MODEL_PRESETS)
@@ -69,12 +84,46 @@ class AutoLabelSettingsDialog(QDialog):
         )
         note.setWordWrap(True)
         local.addRow(note)
+        self.llm_widget = QWidget()
+        llm = QFormLayout(self.llm_widget)
+        llm.setContentsMargins(0, 0, 0, 0)
+        self.base_url = QLineEdit(service.get("base_url", ""))
+        self.base_url.setObjectName("llmBaseUrl")
+        self.base_url.setPlaceholderText("https://your-service.example/v1")
+        self.model_name = QLineEdit(service.get("model", ""))
+        self.model_name.setObjectName("llmModelName")
+        self.key_edit = QLineEdit(api_key)
+        self.key_edit.setObjectName("llmApiKey")
+        self.key_edit.setEchoMode(QLineEdit.Password)
+        self.key_edit.setPlaceholderText(
+            self.text(
+                "Session only; leave blank to use PPOCRLABEL_API_KEY",
+                "仅本次使用；留空使用环境变量 PPOCRLABEL_API_KEY",
+            )
+        )
+        self.instructions = QPlainTextEdit(config["instructions"])
+        self.instructions.setObjectName("annotationInstructions")
+        self.instructions.setFixedHeight(90)
+        llm.addRow(self.text("API base URL", "API 服务地址"), self.base_url)
+        llm.addRow(self.text("Vision model name", "视觉模型名称"), self.model_name)
+        llm.addRow("API Key", self.key_edit)
+        llm.addRow(self.text("Annotation instructions", "附加标注说明"), self.instructions)
+        llm_note = QLabel(
+            self.text(
+                "Whole images are sent to this service when automatic labeling starts. "
+                "The model must support image input and return text polygons. Check the results before confirming.",
+                "点击自动标注后会将整图发送至此服务。模型需支持图片输入和文字定位，" "返回的框与文字直接用于标注，请人工检查后确认。",
+            )
+        )
+        llm_note.setWordWrap(True)
+        llm.addRow(llm_note)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         form.addRow(self.text("Model source", "模型来源"), self.source)
         layout.addLayout(form)
         layout.addWidget(self.official_widget)
         layout.addWidget(self.local_widget)
+        layout.addWidget(self.llm_widget)
         if cli_overrides:
             notice = QLabel(
                 self.text(
@@ -121,16 +170,29 @@ class AutoLabelSettingsDialog(QDialog):
             edit.setText(directory)
 
     def update_fields(self):
-        official = self.source.currentData() == "official"
+        source = self.source.currentData()
+        official = source == "official"
         self.official_widget.setVisible(official)
-        self.local_widget.setVisible(not official)
+        self.local_widget.setVisible(source == "local")
+        self.llm_widget.setVisible(source == "llm")
         self.model_language.setEnabled(self.preset.currentText() == "PP-OCRv5_mobile")
 
     def config(self):
+        source = self.source.currentData()
         return {
-            "model_source": self.source.currentData(),
+            "backend": "llm" if source == "llm" else "paddle",
+            "model_source": self.previous_config["model_source"]
+            if source == "llm"
+            else source,
             "preset": self.preset.currentText(),
             "language": self.model_language.currentData(),
             "det_model_dir": self.det_directory.text().strip(),
             "rec_model_dir": self.rec_directory.text().strip(),
+            "instructions": self.instructions.toPlainText(),
+        }
+
+    def service(self):
+        return {
+            "base_url": self.base_url.text().strip(),
+            "model": self.model_name.text().strip(),
         }

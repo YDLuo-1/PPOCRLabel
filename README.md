@@ -273,6 +273,20 @@ Batch automatic labeling skips **√ confirmed** images. Keep fileState.txt
 together with Label.txt when moving datasets; automatic results still require
 human checking and confirmation.
 
+Choose **LLM vision model** to annotate whole images using a vision-capable
+OpenAI-compatible Chat Completions service. Enter the API base URL (for example,
+http://localhost:8000/v1), model name and optional API key. The endpoint and model
+are remembered globally; the selected backend and annotation instructions are
+saved per dataset. Keys are kept only for the session, or read from
+PPOCRLABEL_API_KEY, and are never saved in ppocrlabel.json.
+
+LLM output is written directly as the usual pending boxes and transcriptions.
+It needs human checking, especially for character localization. Connection and
+authentication failures stop the batch; invalid image responses retain that
+image's previous labels. Cancelling discards an in-flight response, but a remote
+provider may already have processed or billed the request. Single-box and
+current-image re-recognition continue to use the selected Paddle models.
+
 - Default model: PPOCRLabel uses the Chinese and English ultra-lightweight OCR model in PaddleOCR by default, supports Chinese, English and number recognition, and multiple language detection.
 
 - Model language switching: Changing the built-in model language is supportable by clicking "PaddleOCR"-"Choose OCR Model" in the menu bar. Currently supported languages​include French, German, Korean, and Japanese.

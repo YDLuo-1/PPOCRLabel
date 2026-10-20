@@ -247,6 +247,16 @@ v5/v6 模型或本地 Paddle 推理目录。模型名称从 inference.yml 读取
 批量自动标注跳过 **√ 已确认图片**。移动数据集时请同时保留 fileState.txt
 和 Label.txt；自动结果仍需人工检查、确认。
 
+选择 **LLM 视觉模型** 可通过兼容 OpenAI Chat Completions 的视觉服务进行整图
+标注。填写 API 服务地址（例如 http://localhost:8000/v1）、视觉模型名称及可选
+API Key。地址、模型名称全局记住，后端选择及附加标注说明按数据集保存。
+Key 仅本次使用，或从环境变量 PPOCRLABEL_API_KEY 读取，不写入 ppocrlabel.json。
+
+LLM 返回的框与文字直接作为普通待确认标注，仍需人工检查，尤其是框的位置。
+连接或鉴权失败会停止批次，单图返回无效时保留该图原标注。取消会丢弃未完成请求
+的返回结果，但远程服务可能已经处理或计费。单框及当前图片重新识别继续使用
+所选的 Paddle 模型。
+
  - 默认模型：PPOCRLabel默认使用PaddleOCR中的中英文超轻量OCR模型，支持中英文与数字识别，多种语言检测。
 
  - 模型语言切换：用户可通过菜单栏中 "PaddleOCR" - "选择模型" 切换内置模型语言，目前支持的语言包括法文、德文、韩文、日文。具体模型下载链接可参考[PaddleOCR模型列表](https://github.com/PaddlePaddle/PaddleOCR/blob/release/3.0/docs/version3.x/model_list.md).

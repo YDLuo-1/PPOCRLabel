@@ -1,5 +1,4 @@
 import datetime
-import json
 import logging
 import time
 
@@ -14,6 +13,11 @@ from PyQt5.QtWidgets import (
     QListWidget,
 )
 
+from libs.llmAnnotator import (
+    AnnotationCancelled,
+    InvalidAnnotationError,
+    LLMServiceError,
+)
 from libs.utils import newIcon
 
 logger = logging.getLogger("PPOCRLabel")
@@ -22,95 +26,62 @@ logger = logging.getLogger("PPOCRLabel")
 class Worker(QThread):
     progressBarValue = pyqtSignal(int)
     listValue = pyqtSignal(str)
-    end_signal = pyqtSignal(int, str)
-    handle = 0
+    resultReady = pyqtSignal(str, object)
+    end_signal = pyqtSignal(int, int, bool)
 
-    def __init__(self, ocr, img_list, main_thread, model):
-        super(Worker, self).__init__()
-        self.result_dic = None
+    def __init__(self, ocr, img_list, main_thread=None, model="paddle", parent=None):
+        super().__init__(parent)
         self.ocr = ocr
-        self.img_list = img_list
-        self.mainThread = main_thread
+        self.img_list = img_list or []
         self.model = model
         self.setStackSize(1024 * 1024)
 
     def run(self):
-        try:
-            findex = 0
-            for img_path in self.img_list:
-                if self.handle == 0:
-                    self.listValue.emit(img_path)
-                    if self.model == "paddle":
-                        img = cv2.imdecode(
-                            np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR
-                        )
-                        if img is None:
-                            logger.warning(
-                                "Failed to decode image file %s. The file may be corrupted or in an unsupported format.",
-                                img_path,
-                            )
-                            self.result_dic = None
-                        else:
-                            h, w, _ = img.shape
-                            if h > 32 and w > 32:
-                                result = self.ocr.predict(img)[0]
-                                self.result_dic = []
-                                for poly, text, score in zip(
-                                    result["rec_polys"],
-                                    result["rec_texts"],
-                                    result["rec_scores"],
-                                ):
-                                    # Convert numpy array to list for JSON serialization
-                                    poly_list = (
-                                        poly.tolist()
-                                        if hasattr(poly, "tolist")
-                                        else poly
-                                    )
-                                    self.result_dic.append([poly_list, (text, score)])
-                            else:
-                                logger.warning(
-                                    "The size of %s is too small to be recognised",
-                                    img_path,
-                                )
-                                self.result_dic = []  # Clear it instead of None
-
-                    # 结果保存
-                    if not self.result_dic:
-                        logger.warning("No text detected in file %s", img_path)
-                    else:
-                        strs = ""
-                        for res in self.result_dic:
-                            chars = res[1][0]
-                            cond = res[1][1]
-                            posi = res[0]
-                            strs += (
-                                "Transcription: "
-                                + chars
-                                + " Probability: "
-                                + str(cond)
-                                + " Location: "
-                                + json.dumps(posi)
-                                + "\n"
-                            )
-
-                        self.listValue.emit(strs)
-                        self.mainThread.result_dic = self.result_dic
-                        self.mainThread.filePath = img_path
-                        self.mainThread.saveFile(mode="Auto")
-                        # CRITICAL: Clear the result_dic after saving to prevent it from
-                        # leaking into the next image or back into the main UI
-                        self.mainThread.result_dic = []
-                        self.result_dic = []
-
-                    findex += 1
-                    self.progressBarValue.emit(findex)
+        completed, failed, stopped = 0, 0, False
+        for index, img_path in enumerate(self.img_list, 1):
+            if self.isInterruptionRequested():
+                break
+            fatal = False
+            self.listValue.emit(img_path)
+            try:
+                image = cv2.imdecode(
+                    np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+                if image is None:
+                    raise InvalidAnnotationError("Could not decode image.")
+                if self.model == "llm":
+                    results = self.ocr.annotate(image, self.isInterruptionRequested)
                 else:
+                    results = []
+                    if min(image.shape[:2]) > 32:
+                        result = self.ocr.predict(image)[0]
+                        for poly, text, score in zip(
+                            result["rec_polys"],
+                            result["rec_texts"],
+                            result["rec_scores"],
+                        ):
+                            points = poly.tolist() if hasattr(poly, "tolist") else poly
+                            results.append([points, (text, float(score))])
+                if self.isInterruptionRequested():
                     break
-            self.end_signal.emit(0, "readAll")
-            self.exec()
-        except Exception as e:
-            logger.error("Error in worker thread: %s", e)
-            raise
+                self.resultReady.emit(img_path, results)
+                completed += 1
+                self.listValue.emit("Text regions: %s" % len(results))
+            except AnnotationCancelled:
+                stopped = True
+                break
+            except Exception as error:
+                failed += 1
+                fatal = isinstance(error, LLMServiceError)
+                self.listValue.emit("%s: %s" % (type(error).__name__, error))
+                logger.warning("Automatic labeling failed for %s: %s", img_path, error)
+            self.progressBarValue.emit(index)
+            if fatal:
+                stopped = True
+                break
+        self.end_signal.emit(
+            completed, failed, stopped or self.isInterruptionRequested()
+        )
 
 
 class AutoDialog(QDialog):
@@ -121,88 +92,110 @@ class AutoDialog(QDialog):
         ocr=None,
         image_list=None,
         len_bar=0,
+        model="paddle",
     ):
-        super(AutoDialog, self).__init__(parent)
-        self.setFixedWidth(1000)
+        super().__init__(parent)
         self.parent = parent
-        self.ocr = ocr
-        self.img_list = image_list
         self.len_bar = len_bar
-        self.pb = QProgressBar(parent)
-        self.pb.setRange(0, self.len_bar)
+        self._cancelled = False
+        self._save_errors = 0
+        self.setMinimumSize(750, 400)
+        self.resize(950, 480)
+        self.pb = QProgressBar(self)
+        self.pb.setRange(0, len_bar)
         self.pb.setValue(0)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.pb)
-        self.model = "paddle"
         self.listWidget = QListWidget(self)
+        self.buttonBox = BB(BB.Ok | BB.Cancel, Qt.Horizontal, self)
+        self.buttonBox.button(BB.Ok).setIcon(newIcon("done"))
+        self.buttonBox.button(BB.Cancel).setIcon(newIcon("undo"))
+        self.buttonBox.button(BB.Ok).setEnabled(False)
+        self.buttonBox.accepted.connect(self.validate)
+        self.buttonBox.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.pb)
         layout.addWidget(self.listWidget)
-
-        self.buttonBox = bb = BB(BB.Ok | BB.Cancel, Qt.Horizontal, self)
-        bb.button(BB.Ok).setIcon(newIcon("done"))
-        bb.button(BB.Cancel).setIcon(newIcon("undo"))
-        bb.accepted.connect(self.validate)
-        bb.rejected.connect(self.reject)
-        layout.addWidget(bb)
-        bb.button(BB.Ok).setEnabled(False)
-
-        self.setLayout(layout)
-        # self.setWindowTitle("自动标注中")
+        layout.addWidget(self.buttonBox)
         self.setWindowModality(Qt.ApplicationModal)
-
-        # self.setWindowFlags(Qt.WindowCloseButtonHint)
-
-        self.thread_1 = Worker(self.ocr, self.img_list, self.parent, "paddle")
+        self.setWindowTitle(self.text("Automatic labeling", "自动标注"))
+        self.thread_1 = Worker(ocr, image_list, model=model, parent=self)
         self.thread_1.progressBarValue.connect(self.handleProgressBarSingal)
         self.thread_1.listValue.connect(self.handleListWidgetSingal)
+        # Acknowledge each result on the GUI thread before completing the batch.
+        self.thread_1.resultReady.connect(
+            self.handleResult, Qt.BlockingQueuedConnection
+        )
         self.thread_1.end_signal.connect(self.handleEndsignalSignal)
-        self.time_start = time.time()  # save start time
+        self.thread_1.finished.connect(self.workerFinished)
+        self.time_start = time.monotonic()
 
-    def handleProgressBarSingal(self, i):
-        self.pb.setValue(i)
+    def text(self, english, chinese):
+        return chinese if getattr(self.parent, "lang", "en") == "ch" else english
 
-        # calculate time left of auto labeling
-        # Use average time to prevent time fluctuations
-        avg_time = (time.time() - self.time_start) / i
-        time_left = str(
-            datetime.timedelta(seconds=avg_time * (self.len_bar - i))
-        ).split(".")[
-            0
-        ]  # Remove microseconds
-        # show
-        self.setWindowTitle("PPOCRLabel  --  " + f"Time Left: {time_left}")
+    def handleProgressBarSingal(self, index):
+        self.pb.setValue(index)
+        if index:
+            remaining = (
+                (time.monotonic() - self.time_start) / index * (self.len_bar - index)
+            )
+            left = str(datetime.timedelta(seconds=int(remaining)))
+            self.setWindowTitle(self.text("Time left: ", "预计剩余：") + left)
 
-    def handleListWidgetSingal(self, i):
-        self.listWidget.addItem(i)
-        titem = self.listWidget.item(self.listWidget.count() - 1)
-        self.listWidget.scrollToItem(titem)
+    def handleListWidgetSingal(self, value):
+        self.listWidget.addItem(value)
+        self.listWidget.scrollToBottom()
 
-    def handleEndsignalSignal(self, i, str):
-        if i == 0 and str == "readAll":
-            self.buttonBox.button(BB.Ok).setEnabled(True)
-            self.buttonBox.button(BB.Cancel).setEnabled(False)
+    def handleResult(self, path, results):
+        if self._cancelled:
+            return
+        try:
+            self.parent.applyAutoLabelResult(path, results)
+        except Exception as error:
+            self._save_errors += 1
+            self.handleListWidgetSingal(
+                self.text("Could not save result: ", "无法保存结果：") + str(error)
+            )
+            self.thread_1.requestInterruption()
+
+    def handleEndsignalSignal(self, completed, failed, stopped):
+        self.setWindowTitle(
+            self.text("Stopped", "已停止") if stopped else self.text("Completed", "已完成")
+        )
+        self.handleListWidgetSingal(
+            self.text("Completed: %s; failed: %s", "已处理：%s；失败：%s")
+            % (max(0, completed - self._save_errors), failed + self._save_errors)
+        )
+        self.buttonBox.button(BB.Ok).setEnabled(True)
+        self.buttonBox.button(BB.Cancel).setEnabled(False)
+
+    def workerFinished(self):
+        if self._cancelled:
+            self.accept()
 
     def reject(self):
-        logger.debug("Auto recognition dialog rejected")
-        self.thread_1.handle = -1
-        self.thread_1.quit()
-        while not self.thread_1.isFinished():
-            pass
-        self.accept()
+        self._cancelled = True
+        if self.thread_1.isRunning():
+            self.thread_1.requestInterruption()
+            self.buttonBox.button(BB.Cancel).setEnabled(False)
+            self.buttonBox.button(BB.Ok).setEnabled(False)
+            self.setWindowTitle(self.text("Stopping…", "正在停止…"))
+        else:
+            self.accept()
 
     def validate(self):
-        self.accept()
-
-    def postProcess(self):
-        try:
-            self.edit.setText(self.edit.text().trimmed())
-        except AttributeError:
-            self.edit.setText(self.edit.text())
-            logger.debug("Auto dialog text: %s", self.edit.text())
+        if self.thread_1.isRunning():
+            self.reject()
+        else:
+            self.accept()
 
     def popUp(self):
+        if not self.thread_1.img_list:
+            return 1
         self.thread_1.start()
         return 1 if self.exec_() else None
 
-    def closeEvent(self, event, **kwargs):
-        self.reject()
+    def closeEvent(self, event):
+        if self.thread_1.isRunning():
+            event.ignore()
+            self.reject()
+        else:
+            event.accept()

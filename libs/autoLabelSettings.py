@@ -28,11 +28,13 @@ LANGUAGES = {
 
 def default_config(language="ch"):
     return {
+        "backend": "paddle",
         "model_source": "official",
         "preset": MODEL_PRESETS[0],
         "language": language if language in LANGUAGES else "ch",
         "det_model_dir": "",
         "rec_model_dir": "",
+        "instructions": "",
     }
 
 
@@ -45,6 +47,8 @@ def validate_config(value, language="ch"):
             if not isinstance(value[key], str):
                 raise ValueError("Invalid setting: " + key)
             config[key] = value[key]
+    if config["backend"] not in ("paddle", "llm"):
+        raise ValueError("Invalid automatic labeling backend")
     if config["model_source"] not in ("official", "local"):
         raise ValueError("Invalid model source")
     if config["preset"] not in MODEL_PRESETS:

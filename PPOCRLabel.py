@@ -134,6 +134,7 @@ from libs.autoLabelSettings import (
     validate_config,
 )
 from libs.autoLabelSettingsDialog import AutoLabelSettingsDialog
+from libs.llmAnnotator import LLMAnnotator
 from libs.labelDialog import LabelDialog
 from libs.colorDialog import ColorDialog
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
@@ -280,6 +281,11 @@ class MainWindow(QMainWindow):
             ):
                 if value != default:
                     self.model_cli_overrides[key] = value
+        self.llm_service = {
+            "base_url": settings.get("llm_base_url", ""),
+            "model": settings.get("llm_model", ""),
+        }
+        self.llm_api_key = ""
         self.model_config = default_config(self.model_lang)
         self._loaded_model_options = None
         self._model_config_error = None
@@ -3134,10 +3140,31 @@ class MainWindow(QMainWindow):
         self.AutoRecognitionNum.setValue(self.auto_recognition_num)
 
     def autoRecognition(self):
-        assert self.mImgList is not None
-        if not self.ensurePaddleModel():
+        if not self.mImgList:
             return
-        logger.info("Using model from %s", self.model)
+        if self._model_config_error:
+            self.errorMessage(
+                self.stringBundle.getString("autoLabelSettings"),
+                self._model_config_error,
+            )
+            return
+        backend = self.model_config["backend"]
+        if backend == "llm":
+            try:
+                annotator = LLMAnnotator(
+                    **self.llm_service,
+                    api_key=self.llm_api_key,
+                    instructions=self.model_config["instructions"],
+                )
+            except ValueError as error:
+                self.errorMessage(
+                    self.stringBundle.getString("autoLabelSettings"), str(error)
+                )
+                return
+        else:
+            if not self.ensurePaddleModel():
+                return
+            annotator = self.ocr
 
         start_index = self.currIndex
         end_index = min(self.currIndex + self.auto_recognition_num, len(self.mImgList))
@@ -3155,11 +3182,21 @@ class MainWindow(QMainWindow):
             if image_basename not in recorded_basenames:
                 uncheckedList.append(image_path)
 
+        if not uncheckedList:
+            QMessageBox.information(
+                self,
+                self.stringBundle.getString("autoLabelSettings"),
+                "所选范围没有待自动标注的图片（已确认图片会跳过）。"
+                if self.lang == "ch"
+                else "No unconfirmed images in the selected range.",
+            )
+            return
         self.autoDialog = AutoDialog(
             parent=self,
-            ocr=self.ocr,
+            ocr=annotator,
             image_list=uncheckedList,
             len_bar=len(uncheckedList),
+            model=backend,
         )
         self.autoDialog.popUp()
         self.haveAutoReced = True
@@ -3168,6 +3205,18 @@ class MainWindow(QMainWindow):
         self.saveCacheLabel()
 
         self.init_key_list(self.Cachelabel)
+
+    def applyAutoLabelResult(self, image_path, results):
+        # Run on the GUI thread, without changing the current image or its edits.
+        key = self.getImglabelidx(image_path)
+        if self.fileStatedict.get(key) == 1 or self.validFilestate(image_path):
+            return False
+        previous_results = self.result_dic
+        try:
+            self.result_dic = results
+            return self.saveLabels(key, mode="Auto")
+        finally:
+            self.result_dic = previous_results
 
     def reRecognition(self):
         if not self.ensurePaddleModel():
@@ -3615,59 +3664,62 @@ class MainWindow(QMainWindow):
         msg = "JSON successfully saved in {}/gt.txt".format(self.lastOpenDir)
         QMessageBox.information(self, "Information", msg)
 
-    def setAutoLabelConfig(self, config, save=False):
+    def setAutoLabelConfig(self, config, save=False, force_paddle=False):
         config = validate_config(config, self.lang)
-        options = resolve_models(config, self.model_cli_overrides)
-        options["rec_model_name"] = getRecognitionModelName(
-            config["language"], options["rec_model_name"], options["rec_model_dir"]
-        )
         models = None
-        if options != self._loaded_model_options:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                params = {
-                    "use_doc_orientation_classify": False,
-                    "use_doc_unwarping": False,
-                    "use_textline_orientation": False,
-                    "device": self.gpu,
-                    "text_detection_model_name": options["det_model_name"],
-                    "text_recognition_model_name": options["rec_model_name"],
-                    "enable_mkldnn": False,
-                    "cpu_threads": 4,
-                }
-                for task, role in (("det", "detection"), ("rec", "recognition")):
-                    if options[task + "_model_dir"]:
-                        params["text_" + role + "_model_dir"] = options[
-                            task + "_model_dir"
-                        ]
-                if self.cls_model_dir:
-                    params["text_line_orientation_model_dir"] = self.cls_model_dir
-                selected_ocr = PaddleOCR(**params)
-                selected_rec = TextRecognition(
-                    model_name=options["rec_model_name"],
-                    model_dir=options["rec_model_dir"],
-                    device=self.gpu,
-                    enable_mkldnn=False,
-                    cpu_threads=4,
-                )
-                selected_det = TextDetection(
-                    model_name=options["det_model_name"],
-                    model_dir=options["det_model_dir"],
-                    device=self.gpu,
-                    enable_mkldnn=False,
-                    cpu_threads=4,
-                )
-                models = selected_ocr, selected_rec, selected_det
-            finally:
-                QApplication.restoreOverrideCursor()
+        options = None
+        if config["backend"] == "paddle" or force_paddle:
+            options = resolve_models(config, self.model_cli_overrides)
+            options["rec_model_name"] = getRecognitionModelName(
+                config["language"], options["rec_model_name"], options["rec_model_dir"]
+            )
+            if options != self._loaded_model_options:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    params = {
+                        "use_doc_orientation_classify": False,
+                        "use_doc_unwarping": False,
+                        "use_textline_orientation": False,
+                        "device": self.gpu,
+                        "text_detection_model_name": options["det_model_name"],
+                        "text_recognition_model_name": options["rec_model_name"],
+                        "enable_mkldnn": False,
+                        "cpu_threads": 4,
+                    }
+                    for task, role in (("det", "detection"), ("rec", "recognition")):
+                        if options[task + "_model_dir"]:
+                            params["text_" + role + "_model_dir"] = options[
+                                task + "_model_dir"
+                            ]
+                    if self.cls_model_dir:
+                        params["text_line_orientation_model_dir"] = self.cls_model_dir
+                    selected_ocr = PaddleOCR(**params)
+                    selected_rec = TextRecognition(
+                        model_name=options["rec_model_name"],
+                        model_dir=options["rec_model_dir"],
+                        device=self.gpu,
+                        enable_mkldnn=False,
+                        cpu_threads=4,
+                    )
+                    selected_det = TextDetection(
+                        model_name=options["det_model_name"],
+                        model_dir=options["det_model_dir"],
+                        device=self.gpu,
+                        enable_mkldnn=False,
+                        cpu_threads=4,
+                    )
+                    models = selected_ocr, selected_rec, selected_det
+                finally:
+                    QApplication.restoreOverrideCursor()
         if save:
             save_config(self.dirname, config)
         # Publish the complete model set only after loading and saving succeed.
         if models is not None:
             self.ocr, self.text_recognizer, self.text_detector = models
-        self._loaded_model_options = options
-        for key, value in options.items():
-            setattr(self, key, value)
+        if options is not None:
+            self._loaded_model_options = options
+            for key, value in options.items():
+                setattr(self, key, value)
         self.model_config = config
         self.model_lang = config["language"]
         self._model_config_error = None
@@ -3691,6 +3743,14 @@ class MainWindow(QMainWindow):
                 self._model_config_error,
             )
             return False
+        if self.model_config["backend"] == "llm":
+            try:
+                self.setAutoLabelConfig(self.model_config, force_paddle=True)
+            except Exception as error:
+                self.errorMessage(
+                    self.stringBundle.getString("autoLabelSettings"), str(error)
+                )
+                return False
         return True
 
     def autolcm(self):
@@ -3706,10 +3766,20 @@ class MainWindow(QMainWindow):
             self,
             language=self.lang,
             cli_overrides=bool(self.model_cli_overrides),
+            service=self.llm_service,
+            api_key=self.llm_api_key,
         )
         while dialog.exec_() == QDialog.Accepted:
             try:
-                self.setAutoLabelConfig(dialog.config(), save=True)
+                config, service = dialog.config(), dialog.service()
+                if config["backend"] == "llm":
+                    LLMAnnotator(**service, api_key=dialog.key_edit.text())
+                self.setAutoLabelConfig(config, save=True)
+                self.llm_service = service
+                self.llm_api_key = dialog.key_edit.text()
+                self.settings["llm_base_url"] = service["base_url"]
+                self.settings["llm_model"] = service["model"]
+                self.settings.save()
                 return
             except Exception as error:
                 self.errorMessage(

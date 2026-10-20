@@ -123,6 +123,23 @@ def model_method_namespace():
 
 
 class ModelSwitchTest(unittest.TestCase):
+    def test_llm_selection_does_not_require_loading_local_paddle_models(self):
+        namespace = model_method_namespace()
+        window = SimpleNamespace(
+            lang="ch",
+            gpu="cpu",
+            cls_model_dir=None,
+            model_cli_overrides={},
+            _loaded_model_options=None,
+        )
+        config = {**default_config(), "backend": "llm", "model_source": "local"}
+        namespace["setAutoLabelConfig"](window, config)
+        self.assertEqual(window.model_config, config)
+        self.assertIsNone(window._loaded_model_options)
+        namespace["PaddleOCR"].assert_not_called()
+        with self.assertRaises(ValueError):
+            namespace["setAutoLabelConfig"](window, config, force_paddle=True)
+
     def test_three_models_switch_together_and_failed_load_preserves_old_set(self):
         namespace = model_method_namespace()
         switch = namespace["setAutoLabelConfig"]
