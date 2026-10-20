@@ -7,10 +7,13 @@ import os
 import queue
 import re
 import threading
+import time
 from urllib.parse import urlsplit
 
 import cv2
 import requests
+
+TOTAL_TIMEOUT_SECONDS = 300
 
 
 class LLMServiceError(Exception):
@@ -211,7 +214,7 @@ class LLMAnnotator:
             # Do not log provider responses, headers or URLs containing secrets.
             raise LLMServiceError("Could not connect to the vision service.") from None
 
-    def annotate(self, image, cancelled=None):
+    def annotate(self, image, cancelled=None, status=None):
         if cancelled and cancelled():
             raise AnnotationCancelled()
         height, width = image.shape[:2]
@@ -281,8 +284,13 @@ class LLMAnnotator:
                 }
             ],
         }
+        deadline = time.monotonic() + TOTAL_TIMEOUT_SECONDS
         for attempt in range(2):
-            content = self._request(payload, cancelled)
+            if status:
+                status("correcting" if attempt else "requesting")
+            content = self._request(payload, cancelled, deadline)
+            if status:
+                status("validating")
             try:
                 return parse_annotations(content, width, height)
             except InvalidAnnotationError as error:
@@ -300,13 +308,10 @@ class LLMAnnotator:
                     "of a resized image. Do not invent text outside the image."
                 ) % (error, width, height, width, height)
 
-    def _request(self, payload, cancelled):
+    def _request(self, payload, cancelled, deadline):
         if cancelled and cancelled():
             raise AnnotationCancelled()
-        if cancelled is None:
-            return self._complete(payload)
-        # A cancelled HTTP call may finish remotely. Keep that bounded call
-        # independent of Qt so its late response cannot touch UI or labels.
+        # Cancelled or expired calls may finish remotely; late replies cannot touch labels.
         completed = queue.Queue(maxsize=1)
 
         def request():
@@ -317,15 +322,22 @@ class LLMAnnotator:
 
         threading.Thread(target=request, daemon=True).start()
         while True:
-            if cancelled():
+            if cancelled and cancelled():
                 raise AnnotationCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LLMServiceError(
+                    "Vision service exceeded the total time limit (%s seconds, "
+                    "including correction). Batch stopped; existing annotations are preserved."
+                    % TOTAL_TIMEOUT_SECONDS
+                )
             try:
-                content, error = completed.get(timeout=0.1)
+                content, error = completed.get(timeout=min(0.1, remaining))
                 if error is not None:
                     raise error
                 break
             except queue.Empty:
                 continue
-        if cancelled():
+        if cancelled and cancelled():
             raise AnnotationCancelled()
         return content

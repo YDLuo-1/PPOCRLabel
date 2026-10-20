@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -262,6 +262,82 @@ class AutoLabelingTest(unittest.TestCase):
             key = window.getImglabelidx(window.mImgList[1])
             self.assertEqual(window.PPlabel[key][0]["key_cls"], "None")
             window.close()
+
+    def test_waiting_status_updates_while_completed_count_stays_zero(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def delayed(body):
+            entered.set()
+            release.wait(4)
+            return 200, completion()
+
+        with tempfile.TemporaryDirectory() as root, vision_server(delayed) as (url, _):
+            window = LabelWindow(root)
+            window.lang = "ch"
+            dialog = ClosingAutoDialog(
+                parent=window,
+                ocr=LLMAnnotator(url, "vision"),
+                image_list=window.mImgList[1:2],
+                len_bar=1,
+                model="llm",
+            )
+            snapshots = []
+            started = time.monotonic()
+            timer = QTimer()
+            timer.setInterval(10)
+
+            def inspect():
+                if entered.is_set() and not snapshots:
+                    snapshots.append((dialog.statusLabel.text(), dialog.pb.value()))
+                if time.monotonic() - started >= 1.4 and len(snapshots) == 1:
+                    snapshots.append((dialog.statusLabel.text(), dialog.pb.value()))
+                    release.set()
+
+            timer.timeout.connect(inspect)
+            timer.start()
+            try:
+                dialog.popUp()
+            finally:
+                timer.stop()
+                release.set()
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual([value for _, value in snapshots], [0, 0])
+            self.assertIn("1/1", snapshots[1][0])
+            self.assertIn("1.png", snapshots[1][0])
+            self.assertIn("等待完整结果", snapshots[1][0])
+            self.assertIn("300", snapshots[1][0])
+            self.assertNotEqual(snapshots[0][0], snapshots[1][0])
+            self.assertFalse(dialog.status_timer.isActive())
+            self.assertIn("总用时", dialog.statusLabel.text())
+            window.close()
+
+    def test_total_timeout_stops_batch_and_preserves_existing_records(self):
+        release = threading.Event()
+
+        def delayed(body):
+            release.wait(3)
+            return 200, completion()
+
+        with tempfile.TemporaryDirectory() as root, vision_server(delayed) as (
+            url,
+            server,
+        ):
+            window = LabelWindow(root)
+            before = copy.deepcopy(window.PPlabel)
+            before_cache = copy.deepcopy(window.Cachelabel)
+            window.model_config["backend"] = "llm"
+            window.llm_service = {"base_url": url, "model": "test-vision"}
+            try:
+                with patch("libs.llmAnnotator.TOTAL_TIMEOUT_SECONDS", 0.2):
+                    window.autoRecognition()
+                self.assertEqual(len(server.received), 1)
+                self.assertEqual(window.PPlabel, before)
+                self.assertEqual(window.Cachelabel, before_cache)
+                self.assertEqual(window.autoDialog.windowTitle(), "Stopped")
+                self.assertFalse(window.autoDialog.status_timer.isActive())
+            finally:
+                release.set()
+                window.close()
 
     def test_settings_dialog_retains_paddle_selection_and_never_exports_key(self):
         config = {**default_config(), "preset": "PP-OCRv6_medium"}

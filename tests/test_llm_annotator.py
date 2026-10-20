@@ -102,8 +102,11 @@ class LLMAnnotatorTest(unittest.TestCase):
             ]
         }
         responses = iter([completion(invalid), completion()])
+        statuses = []
         with vision_server(lambda body: (200, next(responses))) as (url, server):
-            result = LLMAnnotator(url, "vision").annotate(self.image)
+            result = LLMAnnotator(url, "vision").annotate(
+                self.image, status=statuses.append
+            )
             self.assertEqual(len(server.received), 2)
             self.assertEqual(result[0][0], ANNOTATIONS["annotations"][0]["points"])
             correction = server.received[1][1]["messages"][0]["content"][0]["text"]
@@ -114,6 +117,9 @@ class LLMAnnotatorTest(unittest.TestCase):
             self.assertIn("0-1000", correction)
             self.assertEqual(len(server.received[1][1]["messages"]), 1)
             self.assertEqual(server.received[1][1]["messages"][0]["role"], "user")
+            self.assertEqual(
+                statuses, ["requesting", "validating", "correcting", "validating"]
+            )
 
     def test_two_invalid_outputs_fail_without_clamping_or_more_requests(self):
         invalid = {
@@ -313,6 +319,80 @@ class LLMAnnotatorTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 service_endpoint(url, "vision")
+
+    def test_total_deadline_expires_while_keepalive_bytes_continue(self):
+        release, entered = threading.Event(), threading.Event()
+
+        class KeepaliveHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                entered.set()
+                try:
+                    while not release.wait(0.01):
+                        self.wfile.write(b"\n")
+                        self.wfile.flush()
+                    self.wfile.write(json.dumps(completion()).encode())
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), KeepaliveHandler)
+        server.daemon_threads = True
+        thread = threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
+        )
+        thread.start()
+        real_post = requests.post
+
+        def short_idle_timeout(*args, **kwargs):
+            kwargs["timeout"] = (1, 0.1)
+            return real_post(*args, **kwargs)
+
+        started = time.monotonic()
+        try:
+            with patch("libs.llmAnnotator.TOTAL_TIMEOUT_SECONDS", 0.35), patch(
+                "libs.llmAnnotator.requests.post", side_effect=short_idle_timeout
+            ):
+                with self.assertRaises(LLMServiceError) as caught:
+                    LLMAnnotator(
+                        "http://127.0.0.1:%s/v1" % server.server_port, "vision"
+                    ).annotate(self.image)
+            self.assertTrue(entered.is_set())
+            self.assertIn("total time limit", str(caught.exception))
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_correction_attempt_shares_the_original_deadline(self):
+        release = threading.Event()
+        calls = []
+
+        def delayed(body):
+            calls.append(body)
+            if len(calls) == 1:
+                time.sleep(0.2)
+                return 200, {"choices": [{"message": {"content": "invalid JSON"}}]}
+            release.wait(3)
+            return 200, completion()
+
+        with vision_server(delayed) as (url, _):
+            started = time.monotonic()
+            try:
+                with patch("libs.llmAnnotator.TOTAL_TIMEOUT_SECONDS", 0.4):
+                    with self.assertRaises(LLMServiceError):
+                        LLMAnnotator(url, "vision").annotate(self.image)
+                self.assertEqual(len(calls), 2)
+                self.assertLess(time.monotonic() - started, 0.55)
+            finally:
+                release.set()
 
 
 if __name__ == "__main__":
