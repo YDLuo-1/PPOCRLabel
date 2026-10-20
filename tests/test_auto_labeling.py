@@ -164,6 +164,7 @@ class AutoLabelingTest(unittest.TestCase):
         responses = iter(
             [
                 {"choices": [{"message": {"content": "invalid JSON"}}]},
+                {"choices": [{"message": {"content": "invalid JSON"}}]},
                 completion({"annotations": []}),
             ]
         )

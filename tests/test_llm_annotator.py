@@ -92,6 +92,54 @@ class LLMAnnotatorTest(unittest.TestCase):
             self.assertEqual(result[0][0], ANNOTATIONS["annotations"][0]["points"])
             self.assertEqual(result[0][1], ("A0514+", None))
 
+    def test_invalid_coordinates_are_explained_and_corrected_once(self):
+        invalid = {
+            "annotations": [
+                {
+                    "transcription": "A0514+",
+                    "points": [[2, 3], [121, 3], [121, 25], [2, 25]],
+                }
+            ]
+        }
+        responses = iter([completion(invalid), completion()])
+        with vision_server(lambda body: (200, next(responses))) as (url, server):
+            result = LLMAnnotator(url, "vision").annotate(self.image)
+            self.assertEqual(len(server.received), 2)
+            self.assertEqual(result[0][0], ANNOTATIONS["annotations"][0]["points"])
+            correction = server.received[1][1]["messages"][0]["content"][0]["text"]
+            self.assertIn("point 2 (121, 3)", correction)
+            self.assertIn("original 120x80 image", correction)
+            self.assertIn("0 <= x <= 120", correction)
+            self.assertIn("0 <= y <= 80", correction)
+            self.assertIn("0-1000", correction)
+            self.assertEqual(len(server.received[1][1]["messages"]), 1)
+            self.assertEqual(server.received[1][1]["messages"][0]["role"], "user")
+
+    def test_two_invalid_outputs_fail_without_clamping_or_more_requests(self):
+        invalid = {
+            "annotations": [
+                {
+                    "transcription": "bad",
+                    "points": [[0, 0], [150, 0], [150, 10], [0, 10]],
+                }
+            ]
+        }
+        with vision_server(lambda body: (200, completion(invalid))) as (url, server):
+            with self.assertRaises(InvalidAnnotationError) as caught:
+                LLMAnnotator(url, "vision").annotate(self.image)
+            self.assertEqual(len(server.received), 2)
+            self.assertIn("(150, 0)", str(caught.exception))
+            self.assertIn("single correction retry also failed", str(caught.exception))
+
+    def test_invalid_json_gets_one_correction_attempt(self):
+        responses = iter(
+            [{"choices": [{"message": {"content": "not JSON"}}]}, completion()]
+        )
+        with vision_server(lambda body: (200, next(responses))) as (url, server):
+            result = LLMAnnotator(url, "vision").annotate(self.image)
+            self.assertEqual(len(server.received), 2)
+            self.assertEqual(result[0][1][0], "A0514+")
+
     def test_empty_and_unreadable_annotations_and_fenced_json(self):
         self.assertEqual(parse_annotations('{"annotations":[]}', 120, 80), [])
         value = json.loads(json.dumps(ANNOTATIONS))

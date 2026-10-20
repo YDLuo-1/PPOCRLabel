@@ -96,7 +96,7 @@ def parse_annotations(content, width, height):
     if not isinstance(annotations, list):
         raise InvalidAnnotationError("Expected an annotations array.")
     result = []
-    for annotation in annotations:
+    for region, annotation in enumerate(annotations, 1):
         if not isinstance(annotation, dict):
             raise InvalidAnnotationError("Each annotation must be an object.")
         transcription, points = annotation.get("transcription"), annotation.get(
@@ -109,7 +109,7 @@ def parse_annotations(content, width, height):
         if not isinstance(points, list) or len(points) != 4:
             raise InvalidAnnotationError("Each annotation needs four polygon points.")
         polygon = []
-        for point in points:
+        for point_index, point in enumerate(points, 1):
             if (
                 not isinstance(point, list)
                 or len(point) != 2
@@ -119,10 +119,25 @@ def parse_annotations(content, width, height):
                     or not math.isfinite(n)
                     for n in point
                 )
-                or not (0 <= point[0] <= width and 0 <= point[1] <= height)
             ):
                 raise InvalidAnnotationError(
-                    "Polygon coordinates are invalid or outside the image."
+                    "Annotation %s point %s must be two finite numbers; image is %sx%s."
+                    % (region, point_index, width, height)
+                )
+            if not (0 <= point[0] <= width and 0 <= point[1] <= height):
+                raise InvalidAnnotationError(
+                    "Annotation %s point %s (%s, %s) is outside the %sx%s image; "
+                    "use 0 <= x <= %s and 0 <= y <= %s in original-image pixels."
+                    % (
+                        region,
+                        point_index,
+                        point[0],
+                        point[1],
+                        width,
+                        height,
+                        width,
+                        height,
+                    )
                 )
             polygon.append([int(round(point[0])), int(round(point[1]))])
         crosses = []
@@ -237,30 +252,51 @@ class LLMAnnotator:
                 }
             ],
         }
+        for attempt in range(2):
+            content = self._request(payload, cancelled)
+            try:
+                return parse_annotations(content, width, height)
+            except InvalidAnnotationError as error:
+                if attempt:
+                    raise InvalidAnnotationError(
+                        "%s The single correction retry also failed." % error
+                    ) from None
+                # Keep each request self-contained for providers with different
+                # requirements for assistant/reasoning history.
+                payload["messages"][0]["content"][0]["text"] += (
+                    "\nAn earlier annotation attempt failed validation: %s\n"
+                    "Recheck the SAME original %sx%s image and return corrected JSON only. "
+                    "Every point must be a numeric [x,y] pair in original-image PIXELS: "
+                    "0 <= x <= %s, 0 <= y <= %s. Do not use a 0-1000 scale or coordinates "
+                    "of a resized image. Do not invent text outside the image."
+                ) % (error, width, height, width, height)
+
+    def _request(self, payload, cancelled):
+        if cancelled and cancelled():
+            raise AnnotationCancelled()
         if cancelled is None:
-            content = self._complete(payload)
-        else:
-            # A cancelled HTTP call may finish remotely. Keep that bounded call
-            # independent of Qt so its late response cannot touch UI or labels.
-            completed = queue.Queue(maxsize=1)
+            return self._complete(payload)
+        # A cancelled HTTP call may finish remotely. Keep that bounded call
+        # independent of Qt so its late response cannot touch UI or labels.
+        completed = queue.Queue(maxsize=1)
 
-            def request():
-                try:
-                    completed.put((self._complete(payload), None))
-                except Exception as error:
-                    completed.put((None, error))
+        def request():
+            try:
+                completed.put((self._complete(payload), None))
+            except Exception as error:
+                completed.put((None, error))
 
-            threading.Thread(target=request, daemon=True).start()
-            while True:
-                if cancelled():
-                    raise AnnotationCancelled()
-                try:
-                    content, error = completed.get(timeout=0.1)
-                    if error is not None:
-                        raise error
-                    break
-                except queue.Empty:
-                    continue
+        threading.Thread(target=request, daemon=True).start()
+        while True:
             if cancelled():
                 raise AnnotationCancelled()
-        return parse_annotations(content, width, height)
+            try:
+                content, error = completed.get(timeout=0.1)
+                if error is not None:
+                    raise error
+                break
+            except queue.Empty:
+                continue
+        if cancelled():
+            raise AnnotationCancelled()
+        return content
