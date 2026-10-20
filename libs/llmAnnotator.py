@@ -5,6 +5,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 from urllib.parse import urlsplit
 
@@ -22,6 +23,36 @@ class InvalidAnnotationError(ValueError):
 
 class AnnotationCancelled(Exception):
     pass
+
+
+def service_error_detail(response, api_key=""):
+    """Show the provider's structured error without echoing credentials/images."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error", body)
+    if isinstance(error, str):
+        message = error
+    elif isinstance(error, dict):
+        message = error.get("message", "")
+        if not isinstance(message, str):
+            return ""
+        for key in ("code", "param"):
+            value = error.get(key)
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                message += " (%s: %s)" % (key, str(value)[:128])
+    else:
+        return ""
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted]", message)
+    message = re.sub(r"(?i)\bBearer\s+[^\s,\"']+", "Bearer [redacted]", message)
+    message = re.sub(r"https?://[^\s\"']+", "[URL]", message)
+    message = re.sub(r"data:image/[^\s\"']+", "[image data]", message)
+    return " ".join(message.split())[:800]
 
 
 def service_endpoint(base_url, model):
@@ -129,15 +160,15 @@ class LLMAnnotator:
                 timeout=(10, 120),
                 allow_redirects=False,
             ) as response:
-                if response.status_code in (413, 422):
-                    raise InvalidAnnotationError(
-                        "Image rejected by service (HTTP %s)." % response.status_code
-                    )
                 if not 200 <= response.status_code < 300:
-                    raise LLMServiceError(
-                        "Vision service returned HTTP %s. Check the connection, model and credentials."
-                        % response.status_code
-                    )
+                    detail = service_error_detail(response, self.api_key)
+                    message = "Vision service returned HTTP %s." % response.status_code
+                    if detail:
+                        message += " " + detail
+                if response.status_code in (413, 422):
+                    raise InvalidAnnotationError(message)
+                if not 200 <= response.status_code < 300:
+                    raise LLMServiceError(message)
                 if len(response.content) > 8 * 1024 * 1024:
                     raise InvalidAnnotationError("Vision response is too large.")
                 try:

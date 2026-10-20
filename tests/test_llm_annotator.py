@@ -146,6 +146,60 @@ class LLMAnnotatorTest(unittest.TestCase):
                     self.assertNotIn("provider-private-value", str(caught.exception))
                     self.assertEqual(len(server.received), 1)
 
+    def test_bad_model_reports_provider_message_and_parameter(self):
+        error = {
+            "error": {
+                "message": "Model Not Exist",
+                "type": "invalid_request_error",
+                "code": "model_not_found",
+                "param": "model",
+            },
+            "request": {"private": "must-not-be-shown"},
+        }
+        with vision_server(lambda body: (400, error)) as (url, _):
+            with self.assertRaises(LLMServiceError) as caught:
+                LLMAnnotator(url, "unknown-model").annotate(self.image)
+            text = str(caught.exception)
+            self.assertIn("HTTP 400", text)
+            self.assertIn("Model Not Exist", text)
+            self.assertIn("param: model", text)
+            self.assertIn("model_not_found", text)
+            self.assertNotIn("must-not-be-shown", text)
+
+    def test_provider_error_redacts_key_url_and_image_data(self):
+        error = {
+            "error": {
+                "message": "Rejected session-private-key sk-fake-provider-key "
+                "Bearer unknown-secret https://example.test/?key=secret "
+                "data:image/png;base64,private-image-data"
+            }
+        }
+        with vision_server(lambda body: (400, error)) as (url, _):
+            with self.assertRaises(LLMServiceError) as caught:
+                LLMAnnotator(url, "vision", "session-private-key").annotate(self.image)
+            text = str(caught.exception)
+            self.assertIn("[redacted]", text)
+            for private in (
+                "session-private-key",
+                "sk-fake-provider-key",
+                "unknown-secret",
+                "example.test",
+                "private-image-data",
+            ):
+                self.assertNotIn(private, text)
+
+    def test_unstructured_error_does_not_dump_the_response(self):
+        for error in (
+            {"unrelated": "private-value"},
+            ["private-value"],
+            "private-value",
+        ):
+            with vision_server(lambda body: (400, error)) as (url, _):
+                with self.assertRaises(LLMServiceError) as caught:
+                    LLMAnnotator(url, "vision").annotate(self.image)
+                self.assertIn("HTTP 400", str(caught.exception))
+                self.assertNotIn("private-value", str(caught.exception))
+
     def test_image_rejection_and_malformed_envelope(self):
         for status, value in [(413, {}), (422, {}), (200, {"choices": []})]:
             with self.subTest(status=status):

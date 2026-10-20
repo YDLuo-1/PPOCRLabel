@@ -92,6 +92,12 @@ class AutoLabelSettingsDialog(QDialog):
         self.base_url.setPlaceholderText("https://your-service.example/v1")
         self.model_name = QLineEdit(service.get("model", ""))
         self.model_name.setObjectName("llmModelName")
+        model_hint = self.text(
+            "API model ID, e.g. deepseek-flash; not the API key's name",
+            "填写模型 ID，例如 deepseek-flash；不要填 API Key 的备注名",
+        )
+        self.model_name.setPlaceholderText(model_hint)
+        self.model_name.setToolTip(model_hint)
         self.key_edit = QLineEdit(api_key)
         self.key_edit.setObjectName("llmApiKey")
         self.key_edit.setEchoMode(QLineEdit.Password)

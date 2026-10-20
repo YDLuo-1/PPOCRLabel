@@ -184,17 +184,27 @@ class AutoLabelingTest(unittest.TestCase):
             window.close()
 
     def test_authentication_error_stops_batch(self):
-        with tempfile.TemporaryDirectory() as root, vision_server(
-            lambda body: (401, {})
-        ) as (url, server):
-            window = LabelWindow(root)
-            before = copy.deepcopy(window.PPlabel)
-            window.model_config["backend"] = "llm"
-            window.llm_service = {"base_url": url, "model": "test-vision"}
-            window.autoRecognition()
-            self.assertEqual(len(server.received), 1)
-            self.assertEqual(window.PPlabel, before)
-            window.close()
+        for status, error in (
+            (401, {}),
+            (400, {"error": {"message": "Model Not Exist", "param": "model"}}),
+        ):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as root:
+                with vision_server(lambda body: (status, error)) as (url, server):
+                    window = LabelWindow(root)
+                    before = copy.deepcopy(window.PPlabel)
+                    window.model_config["backend"] = "llm"
+                    window.llm_service = {"base_url": url, "model": "test-vision"}
+                    window.autoRecognition()
+                    self.assertEqual(len(server.received), 1)
+                    self.assertEqual(window.PPlabel, before)
+                    if status == 400:
+                        log = "\n".join(
+                            window.autoDialog.listWidget.item(i).text()
+                            for i in range(window.autoDialog.listWidget.count())
+                        )
+                        self.assertIn("Model Not Exist", log)
+                        self.assertIn("param: model", log)
+                    window.close()
 
     def test_cancellation_ignores_late_response_and_next_image(self):
         entered, release = threading.Event(), threading.Event()
