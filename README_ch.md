@@ -2,6 +2,10 @@
 
 # PPOCRLabelv3
 
+本分支保留实验性的视觉 LLM 自动标注功能，后续可更换服务和模型继续测试。
+配置方法、发送给服务的数据和当前限制见 [LLM 测试说明](LLM_EXPERIMENTAL.md)。
+Paddle 模型选择功能使用独立分支提交官方 PR。
+
 [![PyPI - Version](https://img.shields.io/pypi/v/PPOCRLabel)](https://pypi.org/project/PPOCRLabel/)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/PPOCRLabel)](https://github.com/PFCCLab/PPOCRLabel)
 [![Downloads](https://static.pepy.tech/badge/PPOCRLabel)](https://github.com/PFCCLab/PPOCRLabel)

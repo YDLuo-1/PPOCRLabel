@@ -19,7 +19,11 @@ class ApiKeySettingsTest(unittest.TestCase):
             settings.set_api_key("  " + key + "  ")
             settings.save()
             data = Path(settings.path).read_bytes()
-            for plaintext in (key.encode(), key.encode("utf-16-le"), base64.b64encode(key.encode())):
+            for plaintext in (
+                key.encode(),
+                key.encode("utf-16-le"),
+                base64.b64encode(key.encode()),
+            ):
                 self.assertNotIn(plaintext, data)
             restored = Settings()
             restored.path = settings.path
@@ -30,7 +34,11 @@ class ApiKeySettingsTest(unittest.TestCase):
 
     def test_clear_removes_stored_credentials_without_encryption(self):
         settings = Settings()
-        settings.data = {"llm_api_key_dpapi": "old-encrypted", "llm_api_key": "legacy", "llm_model": "vision"}
+        settings.data = {
+            "llm_api_key_dpapi": "old-encrypted",
+            "llm_api_key": "legacy",
+            "llm_model": "vision",
+        }
         with patch("libs.settings._crypt_api_key") as crypt:
             settings.set_api_key("  ")
             crypt.assert_not_called()
@@ -46,7 +54,10 @@ class ApiKeySettingsTest(unittest.TestCase):
         self.assertEqual(settings.data, {"llm_api_key_dpapi": "previous-encrypted"})
 
     def test_bad_ciphertext_returns_empty_without_logging_the_value(self):
-        for encrypted in ("not valid base64!", base64.b64encode(b"not a DPAPI blob").decode("ascii")):
+        for encrypted in (
+            "not valid base64!",
+            base64.b64encode(b"not a DPAPI blob").decode("ascii"),
+        ):
             with self.subTest(encrypted=encrypted):
                 settings = Settings()
                 settings["llm_api_key_dpapi"] = encrypted

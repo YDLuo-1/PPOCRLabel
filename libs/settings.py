@@ -22,7 +22,9 @@ logger = logging.getLogger("PPOCRLabel")
 
 def _crypt_api_key(data, decrypt=False):
     if os.name != "nt":
-        raise OSError("Encrypted API key storage requires Windows; use PPOCRLABEL_API_KEY instead.")
+        raise OSError(
+            "Encrypted API key storage requires Windows; use PPOCRLABEL_API_KEY instead."
+        )
 
     class DataBlob(ctypes.Structure):
         _fields_ = [("size", ctypes.c_uint32), ("data", ctypes.c_void_p)]
@@ -33,8 +35,13 @@ def _crypt_api_key(data, decrypt=False):
     local_free.restype = ctypes.c_void_p
     operation = crypt32.CryptUnprotectData if decrypt else crypt32.CryptProtectData
     operation.argtypes = [
-        ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.POINTER(DataBlob),
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(DataBlob),
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(DataBlob),
     ]
     operation.restype = ctypes.c_int
     buffer = ctypes.create_string_buffer(data)
@@ -42,7 +49,9 @@ def _crypt_api_key(data, decrypt=False):
     result = DataBlob()
     try:
         # UI_FORBIDDEN; omitting LOCAL_MACHINE binds protection to the current user.
-        if not operation(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(result)):
+        if not operation(
+            ctypes.byref(source), None, None, None, None, 1, ctypes.byref(result)
+        ):
             raise ctypes.WinError(ctypes.get_last_error())
         return ctypes.string_at(result.data, result.size)
     finally:
@@ -79,14 +88,17 @@ class Settings(object):
                 base64.b64decode(encrypted, validate=True), decrypt=True
             ).decode("utf-8")
         except (OSError, ValueError, TypeError):
-            logger.warning("Cannot decrypt the saved API key; enter it again in automatic labeling settings.")
+            logger.warning(
+                "Cannot decrypt the saved API key; enter it again in automatic labeling settings."
+            )
             return ""
 
     def set_api_key(self, api_key):
         api_key = api_key.strip()
         encrypted = (
             base64.b64encode(_crypt_api_key(api_key.encode("utf-8"))).decode("ascii")
-            if api_key else ""
+            if api_key
+            else ""
         )
         self.data.pop("llm_api_key", None)
         if encrypted:

@@ -2,6 +2,11 @@ English | [简体中文](README_ch.md)
 
 # PPOCRLabelv3
 
+This branch includes an experimental vision LLM backend. See
+[LLM evaluation notes](LLM_EXPERIMENTAL.md) for setup, data sent to the service,
+and current limitations. The Paddle model selection change is maintained
+separately for upstream review.
+
 [![PyPI - Version](https://img.shields.io/pypi/v/PPOCRLabel)](https://pypi.org/project/PPOCRLabel/)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/PPOCRLabel)](https://github.com/PFCCLab/PPOCRLabel)
 [![Downloads](https://static.pepy.tech/badge/PPOCRLabel)](https://github.com/PFCCLab/PPOCRLabel)
