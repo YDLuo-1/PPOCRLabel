@@ -103,8 +103,15 @@ class AutoLabelSettingsDialog(QDialog):
         self.key_edit.setEchoMode(QLineEdit.Password)
         self.key_edit.setPlaceholderText(
             self.text(
-                "Session only; leave blank to use PPOCRLABEL_API_KEY",
-                "仅本次使用；留空使用环境变量 PPOCRLABEL_API_KEY",
+                "Encrypted on this computer; leave blank to use PPOCRLABEL_API_KEY",
+                "本机加密保存；留空使用环境变量 PPOCRLABEL_API_KEY",
+            )
+        )
+        self.key_edit.setToolTip(
+            self.text(
+                "Encrypted with Windows DPAPI in the application's global settings, not in the dataset. "
+                "Clear this field and click OK to remove the saved key.",
+                "Key 使用 Windows DPAPI 加密保存在本机全局配置中，不写入数据集。清空后点击确定可删除已保存的 Key。",
             )
         )
         self.instructions = QPlainTextEdit(config["instructions"])

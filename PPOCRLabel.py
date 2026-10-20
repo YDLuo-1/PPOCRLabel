@@ -285,7 +285,7 @@ class MainWindow(QMainWindow):
             "base_url": settings.get("llm_base_url", ""),
             "model": settings.get("llm_model", ""),
         }
-        self.llm_api_key = ""
+        self.llm_api_key = settings.get_api_key()
         self.model_config = default_config(self.model_lang)
         self._loaded_model_options = None
         self._model_config_error = None
@@ -3775,8 +3775,9 @@ class MainWindow(QMainWindow):
                 if config["backend"] == "llm":
                     LLMAnnotator(**service, api_key=dialog.key_edit.text())
                 self.setAutoLabelConfig(config, save=True)
+                self.settings.set_api_key(dialog.key_edit.text())
                 self.llm_service = service
-                self.llm_api_key = dialog.key_edit.text()
+                self.llm_api_key = dialog.key_edit.text().strip()
                 self.settings["llm_base_url"] = service["base_url"]
                 self.settings["llm_model"] = service["model"]
                 self.settings.save()
